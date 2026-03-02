@@ -1,0 +1,6 @@
+{
+  "tech_interest": ["golang", "python", "rust", "kubernetes", "docker", "api", "database", "backend", "frontend", "cloud"],
+  "finance_interest": ["stock", "crypto", "bitcoin", "investment", "trading", "market", "fund", "etf", "portfolio", "yield"],
+  "ai_interest": ["llm", "gpt", "ai", "machine", "learning", "neural", "model", "inference", "training", "transformer"],
+  "high_influence": ["show", "ask", "launch", "release", "announce", "new", "open", "source", "build", "create"]
+}
