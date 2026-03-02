@@ -1,6 +1,12 @@
 # Pulse
 
-A concurrent social media intelligence pipeline written in **Go**. Crawls public data from HackerNews and Reddit, builds structured user profiles, and extracts scored intelligence signals for downstream analytics.
+A **concurrent social media intelligence pipeline** written in **Go**. Pulse crawls public data from Hacker News and Reddit, enriches each post with keyword extraction and engagement metrics, aggregates activity into **user profiles**, and scores each user on seven **intelligence signals** (e.g. tech interest, AI interest, influence). Results are stored in PostgreSQL and can be exported as tidy CSVs for analysis, dashboards, or portfolio demos.
+
+**Use cases:** identify high-signal users by topic (e.g. “who talks about AI?”), measure engagement and influence, feed downstream analytics or ML, or demonstrate concurrent Go, APIs, and data pipelines.
+
+**In short:** run `docker compose up --build`, wait for a cycle, then query Postgres or run `./scripts/export_csv.sh` to get **raw_posts** (crawled content and tags) and **user_profiles** (one row per user with seven 0–1 signal scores). See [Project results](#project-results--what-the-pipeline-produces) for a detailed explanation of the outputs and how to interpret them.
+
+---
 
 ## Architecture
 
@@ -17,6 +23,17 @@ A concurrent social media intelligence pipeline written in **Go**. Crawls public
 │  (goroutines)│                      │                        │
 └──────────────┴──────────────────────┴───────────────────────┘
 ```
+
+**Data flow (each 15‑minute cycle):**
+
+1. **Crawl** — Fetch top 50 Hacker News stories and 25 hot posts from each of 5 subreddits (`golang`, `programming`, `datascience`, `MachineLearning`, `finance`) using concurrent workers and rate limiting.
+2. **Enrich** — Extract top keywords from each post’s title and body (stopwords removed), and compute engagement (score + 2× comments).
+3. **Store posts** — Upsert into `raw_posts` (id, source, author, title, body, url, score, num_comments, tags, subreddit, timestamps).
+4. **Build profiles** — Group posts by author and source; aggregate post count, engagement, top keywords, active hours, and subreddit distribution per user.
+5. **Compute signals** — Score each profile on seven dimensions (topic affinity from keywords, influence from engagement, activity spread, recency).
+6. **Store profiles** — Upsert into `user_profiles` (username, source, metrics, and a JSONB `signals` object with all seven scores).
+
+---
 
 ## Key Go Features Used
 
@@ -44,7 +61,8 @@ pulse/
 │   ├── signals/        # Intelligence signal computation
 │   └── storage/        # PostgreSQL storage layer
 └── scripts/
-    └── schema.sql      # DB schema with indexes
+    ├── schema.sql      # DB schema with indexes
+    └── export_csv.sh   # Export tidy raw_posts + user_profiles to output/*.csv
 ```
 
 ## How to run
@@ -88,17 +106,67 @@ go run ./cmd/pulse
 
 ---
 
-## Results (sample run)
+## Project results — what the pipeline produces
 
-A typical cycle on a fresh run:
+Pulse produces **two main outputs**: a table of **crawled posts** and a table of **user profiles with signal scores**. Below is what each is, what the numbers mean, and how to interpret them.
+
+### 1. Raw posts (`raw_posts` / `raw_posts.csv`)
+
+**What it is:** One row per story or thread that was crawled from Hacker News or Reddit.
+
+| What you get | Description |
+|--------------|--------------|
+| **Volume per cycle** | ~50 HN stories + ~125 Reddit posts (25 × 5 subreddits) → **~175 posts** per run. Over time, rows accumulate (upsert by id), so total count grows. |
+| **Fields** | `id`, `source` (hackernews | reddit), `author`, `title`, `body`, `url`, `score`, `num_comments`, `tags` (auto-extracted keywords), `subreddit` (Reddit only), `created_at`, `fetched_at`. |
+| **What it’s for** | See exactly what was posted, by whom, how it performed (score, comments), and what topics appear (tags). Use for content analysis, trend checks, or feeding other tools. |
+
+**Interpretation:** Higher `score` and `num_comments` mean more engagement. `tags` are the main repeated terms from title+body (stopwords removed) and reflect the post’s topic in a simple way.
+
+---
+
+### 2. User profiles with signals (`user_profiles` / `user_profiles.csv`)
+
+**What it is:** One row per **user** (author), with aggregated activity and **seven signal scores** (0–1) that describe their interests and behavior.
+
+| What you get | Description |
+|--------------|--------------|
+| **Volume per cycle** | ~140–150 unique users per run (combined HN + Reddit). Profiles are upserted by (username, source), so data accumulates and updates over time. |
+| **Aggregated fields** | `post_count`, `avg_score`, `total_engagement`, `top_keywords` (merged from their posts), `active_hours` (when they post), `top_subreddits` (Reddit only). |
+| **Signal columns** | Seven numeric scores (0–1): `tech_interest`, `finance_interest`, `ai_interest`, `high_influence`, `influence_score`, `activity_consistency`, `recency`. In the DB they live in a JSONB `signals` object; in the CSV export they are **separate columns** for easy filtering and sorting. |
+
+**What each signal means and how to interpret it:**
+
+| Signal | How it’s computed | How to interpret |
+|--------|-------------------|------------------|
+| **tech_interest** | Overlap between user’s top keywords and a tech keyword set (e.g. golang, python, api, cloud). | **Higher (e.g. >0.3)** → user’s posts often mention tech terms. Good for finding “tech-oriented” users. |
+| **finance_interest** | Overlap with finance/crypto/trading keywords. | **Higher** → user talks about markets, crypto, investing. |
+| **ai_interest** | Overlap with AI/ML/LLM keywords. | **Higher** → user discusses AI, ML, models, etc. Use to find “AI-interested” users. |
+| **high_influence** | Overlap with “launch”, “release”, “announce”, “show”, etc. | **Higher** → user tends to post announcement-style content. |
+| **influence_score** | Normalized engagement (avg engagement per post, capped). | **Higher** → posts get more upvotes/comments on average. Pure reach/engagement. |
+| **activity_consistency** | Entropy of posting hour distribution. | **Higher** → posts are spread across many hours (consistent); **lower** → posts cluster in few hours. |
+| **recency** | Decay since last seen (≈ 30-day half-life). | **Higher** → user posted recently; **lower** → inactive for a while. |
+
+**Example interpretations:**
+
+- **High `ai_interest` + high `influence_score`** → user who talks about AI and gets strong engagement; good candidate for “influential AI” lists.
+- **High `tech_interest` + high `recency`** → active tech-oriented user.
+- **Low `recency`** → user hasn’t appeared in the crawl recently; profile may be stale.
+
+So the **project results** are: (1) a **post-level dataset** (what was said, by whom, how it performed), and (2) a **user-level dataset** with **seven interpretable scores** you can use to segment and analyze audiences (e.g. for portfolios, demos, or downstream analytics).
+
+---
+
+### 3. Typical run (numbers and logs)
+
+A single cycle usually looks like this:
 
 | Step | Result |
 |------|--------|
-| **HackerNews** | 50 top stories fetched (concurrent workers) |
+| **Hacker News** | 50 top stories fetched (concurrent workers) |
 | **Reddit** | 25 hot posts × 5 subreddits = 125 posts (`golang`, `programming`, `datascience`, `MachineLearning`, `finance`) |
-| **Total posts** | 175 stored (with keyword tags and engagement scores) |
-| **User profiles** | 140 unique users aggregated and scored |
-| **Cycle time** | ~10–15 seconds per cycle |
+| **Total posts stored** | ~175 (with keyword tags and engagement) |
+| **User profiles built** | ~140 unique users, each with 7 signal scores |
+| **Cycle time** | ~10–15 seconds |
 | **Schedule** | New cycle every 15 minutes |
 
 Example log output:
@@ -118,6 +186,8 @@ Example log output:
 {"level":"info","msg":"cycle complete — sleeping 15 minutes"}
 ```
 
+**Results summary:** Pulse gives you (1) **post-level data** — what was posted, by whom, engagement, and tags — and (2) **user-level data** — one row per author with seven **interpretable scores** (tech/finance/AI interest, influence, activity pattern, recency). Use the CSVs or SQL to filter and sort (e.g. “users with high AI interest and high influence”) for analytics or demos.
+
 ---
 
 ## What’s the end result?
@@ -129,7 +199,9 @@ The pipeline writes everything into **PostgreSQL**. The “end result” is two 
 | **`raw_posts`** | Crawled posts (HN + Reddit): title, author, score, comments, tags, source, timestamps |
 | **`user_profiles`** | One row per user: post count, engagement, top keywords, **`signals`** (JSONB with 7 scores) |
 
-### How to view it
+**Full explanation of the two tables and how to interpret the seven signals:** see [Project results](#project-results--what-the-pipeline-produces) above.
+
+### View in the database
 
 **If you run with Docker:** after at least one cycle has finished, connect to the DB from your machine:
 
@@ -198,7 +270,7 @@ So every time you run the script, you get **tidier, consistent CSVs**: flattened
 | `url` | Link URL | `https://rsaksida.com/blog/ape-coding/` |
 | `score` | Upvotes / points | `164` |
 | `num_comments` | Number of comments | `109` |
-| `tags` | Top keywords extracted from title+body | `{ape,coding,fiction}` |
+| `tags` | Top keywords extracted from title+body (semicolon-separated in CSV) | `ape; coding; fiction` |
 | `subreddit` | Reddit only: which subreddit | `programming` or empty for HN |
 | `created_at` | When the post was created (UTC) | `2026-03-01 14:07:05+00` |
 | `fetched_at` | When Pulse stored it (UTC) | `2026-03-02 06:54:04+00` |
@@ -216,14 +288,14 @@ So this file is the **raw feed**: every Hacker News and Reddit post the pipeline
 | `post_count` | How many of their posts were in this crawl | `1`, `2`, … |
 | `avg_score` | Average engagement (score + 2×comments) per post | `605` |
 | `total_engagement` | Sum of engagement across posts | `605` |
-| `top_keywords` | Merged top keywords from their posts | `{decision,trees,nested,rules}` |
+| `top_keywords` | Merged top keywords from their posts (semicolon-separated in CSV) | `decision; trees; nested; rules` |
 | `active_hours` | When they post (hour of day → count) | `{"8": 1}` = 1 post at 8:00 |
 | `top_subreddits` | Reddit only: which subreddits they posted in | `{"golang": 1}` |
-| `signals` | **Intelligence scores (0–1)** — see below | JSON with 7 scores |
+| **Signal columns** | In **CSV export**, the seven scores are **separate columns**: `tech_interest`, `finance_interest`, `ai_interest`, `high_influence`, `influence_score`, `activity_consistency`, `recency` (each 0–1). In the DB they are stored as JSONB in `signals`. | e.g. `0.25`, `0.00`, `0.10` |
 | `first_seen` / `last_seen` | First and last post time in this data | UTC timestamps |
 | `updated_at` | When the profile was last updated | UTC |
 
-The **`signals`** column is a JSON object with seven scores (each 0.0 to 1.0):
+The **seven signal columns** (or the `signals` JSON in the DB) contain:
 
 - **`tech_interest`** — How much their keywords match tech (Go, Python, API, cloud, …)
 - **`finance_interest`** — Match to finance/crypto/trading terms
