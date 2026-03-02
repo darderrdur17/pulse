@@ -23,6 +23,10 @@ type Config struct {
 
 	// Reddit targets (comma-separated subreddits)
 	Subreddits []string
+
+	// Kafka (optional). If KafkaBrokers is empty, Kafka is disabled.
+	KafkaBrokers string
+	KafkaTopic   string
 }
 
 // Load reads config from environment variables (with .env fallback)
@@ -38,6 +42,8 @@ func Load() *Config {
 		RequestsPerSec:  getEnvInt("REQUESTS_PER_SEC", 5),
 		MaxRetries:      getEnvInt("MAX_RETRIES", 3),
 		Subreddits:      []string{"golang", "programming", "datascience", "MachineLearning", "finance"},
+		KafkaBrokers:    getEnv("KAFKA_BROKERS", ""),
+		KafkaTopic:      getEnv("KAFKA_TOPIC", "pulse.posts"),
 	}
 }
 

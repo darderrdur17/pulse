@@ -54,8 +54,12 @@ pulse/
 ├── cmd/pulse/              # Main entrypoint
 ├── config/                 # Environment-based config
 │   └── topic_keywords.json # Optional: custom keywords for signals (edit to add your own)
+├── docs/
+│   ├── KAFKA.md            # Step-by-step Kafka guide (beginning to end)
+│   └── VERIFY.md           # Checklist: verify project + Kafka (Postgres, CSV, consume)
 ├── internal/
 │   ├── crawler/        # HackerNews + Reddit crawlers
+│   ├── kafka/          # Optional Kafka producer (enriched posts as JSON)
 │   ├── models/         # Shared data schemas
 │   ├── processor/      # Keyword extraction + user profiling
 │   ├── signals/        # Intelligence signal computation
@@ -76,6 +80,22 @@ docker compose up --build
 This starts PostgreSQL and the Pulse pipeline. The pipeline runs a full crawl every 15 minutes. Stop with `Ctrl+C` or run in the background with `docker compose up -d`.
 
 **Prerequisites:** [Docker](https://docs.docker.com/get-docker/) (Docker Desktop or Engine + Compose). No API keys required — HackerNews and Reddit use public endpoints.
+
+---
+
+## GitHub
+
+**Repository:** [github.com/derr/pulse](https://github.com/derr/pulse) (replace `derr` with your username if you forked or cloned from your own repo)
+
+**Clone and run:**
+
+```bash
+git clone https://github.com/derr/pulse.git
+cd pulse
+docker compose up --build
+```
+
+After the first cycle (~15 seconds), export CSVs: `./scripts/export_csv.sh` — outputs are in `output/raw_posts.csv` and `output/user_profiles.csv`. See [Project results](#project-results--what-the-pipeline-produces) for what the data means.
 
 ---
 
@@ -355,6 +375,52 @@ LIMIT 20;
 | `MAX_CONCURRENCY` | `10` | Worker goroutines per crawler |
 | `REQUESTS_PER_SEC` | `5` | Rate limit (req/s per source) |
 | `MAX_RETRIES` | `3` | Max retries with exponential backoff |
+| `KAFKA_BROKERS` | *(empty)* | If set, enriched posts are also produced to Kafka (comma-separated brokers, e.g. `localhost:9092`) |
+| `KAFKA_TOPIC` | `pulse.posts` | Kafka topic for post messages |
+
+---
+
+## Kafka (optional)
+
+When **`KAFKA_BROKERS`** is set, Pulse produces each **enriched post** (after keyword extraction) to Kafka in addition to writing to PostgreSQL. Messages are JSON-serialised `RawPost` records; the message **key** is the post `id` (e.g. `hn_123`, `reddit_abc`).
+
+**Full guide (beginning to end):** [docs/KAFKA.md](docs/KAFKA.md) — start Kafka, run Pulse with Kafka, and consume messages step by step.
+
+**Quick start with Kafka (Postgres + Kafka + Pulse in one command):**
+```bash
+docker compose -f docker-compose.yml -f docker-compose.kafka.yml up --build
+```
+
+**Verify project and Kafka:** [docs/VERIFY.md](docs/VERIFY.md) — checklist to confirm Postgres, CSV export, and Kafka produce/consume all work.
+
+**Environment variables:**
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `KAFKA_BROKERS` | `localhost:9092` or `kafka1:9092,kafka2:9092` | One or more broker addresses (comma-separated). If empty, Kafka is disabled. |
+| `KAFKA_TOPIC` | `pulse.posts` | Topic name (default `pulse.posts`). |
+
+**Run with Kafka (Docker):**
+
+1. Start Kafka (e.g. with Docker). Example one-liner:
+   ```bash
+   docker run -d --name kafka -p 9092:9092 -e KAFKA_CFG_NODE_ID=0 -e KAFKA_CFG_PROCESS_ROLES=controller,broker -e KAFKA_CFG_LISTENERS=PLAINTEXT://:9092 apache/kafka:3.7.0
+   ```
+2. Start Pulse with Kafka env set:
+   ```bash
+   export KAFKA_BROKERS=localhost:9092
+   docker compose up --build
+   ```
+   Or add to `docker-compose.yml` under `pipeline`:
+   ```yaml
+   environment:
+     KAFKA_BROKERS: kafka:9092   # if Kafka is a service in the same compose
+     KAFKA_TOPIC: pulse.posts
+   ```
+
+**Message format:** Each Kafka message is a JSON object with the same shape as `RawPost`: `id`, `source`, `author`, `title`, `body`, `url`, `score`, `num_comments`, `tags` (array), `subreddit`, `created_at`, `fetched_at`. You can consume with Kafka Connect, Flink, or any consumer and map the payload to Avro/JSON as needed.
+
+---
 
 ## Extending Pulse
 
@@ -362,4 +428,4 @@ LIMIT 20;
 
 **Add a new signal:** add a new key and keyword list to `config/topic_keywords.json` (see [Custom topic keywords](#custom-topic-keywords-finduse-your-own)) — it will be scored and stored in the JSONB `signals` column and in the CSV export. Alternatively, edit `defaultTopicKeywords` in `internal/signals/extractor.go`.
 
-**Connect to Kafka/Flink:** replace the `store.UpsertPosts` call in `main.go` with a Kafka producer; the normalised `RawPost` schema maps cleanly to an Avro/JSON topic.
+**Kafka:** set `KAFKA_BROKERS` (see [Kafka (optional)](#kafka-optional)); the pipeline will produce enriched posts to the configured topic in addition to storing in PostgreSQL.

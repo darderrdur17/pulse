@@ -9,6 +9,7 @@ import (
 
 	"github.com/derr/pulse/config"
 	"github.com/derr/pulse/internal/crawler"
+	"github.com/derr/pulse/internal/kafka"
 	"github.com/derr/pulse/internal/processor"
 	"github.com/derr/pulse/internal/signals"
 	"github.com/derr/pulse/internal/storage"
@@ -59,9 +60,21 @@ func main() {
 	}
 	sigExtractor := signals.NewWithKeywords(keywords)
 
+	// ── Kafka (optional) ─────────────────────────────────────────────────────
+	var kafkaProducer *kafka.Producer
+	if cfg.KafkaBrokers != "" {
+		var err error
+		kafkaProducer, err = kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaTopic, logger)
+		if err != nil {
+			logger.Fatal("kafka producer", zap.Error(err))
+		}
+		defer kafkaProducer.Close()
+		logger.Info("kafka enabled", zap.String("brokers", cfg.KafkaBrokers), zap.String("topic", cfg.KafkaTopic))
+	}
+
 	// ── Run pipeline ────────────────────────────────────────────────────────
 	for {
-		runCycle(ctx, logger, cfg, hnCrawler, redditCrawler, proc, sigExtractor, store)
+		runCycle(ctx, logger, cfg, hnCrawler, redditCrawler, proc, sigExtractor, store, kafkaProducer)
 
 		logger.Info("cycle complete — sleeping 15 minutes")
 		select {
@@ -83,6 +96,7 @@ func runCycle(
 	proc *processor.Processor,
 	sigExt *signals.Extractor,
 	store *storage.Store,
+	kafkaProducer *kafka.Producer,
 ) {
 	start := time.Now()
 	logger.Info("starting crawl cycle")
@@ -103,6 +117,15 @@ func runCycle(
 
 	// 2. Enrich posts (keyword extraction, engagement scoring) ───────────────
 	enriched := proc.EnrichBatch(allPosts)
+
+	// 2b. Produce to Kafka (optional) ────────────────────────────────────────
+	if kafkaProducer != nil {
+		if n, err := kafkaProducer.SendPosts(ctx, enriched); err != nil {
+			logger.Error("kafka produce", zap.Error(err))
+		} else if n > 0 {
+			logger.Info("kafka produced", zap.Int("count", n))
+		}
+	}
 
 	// 3. Store posts ─────────────────────────────────────────────────────────
 	saved, err := store.UpsertPosts(ctx, enriched)

@@ -1,0 +1,50 @@
+# Optional: add Kafka (KRaft, no Zookeeper) and enable Pulse to produce to it.
+# Run: docker compose -f docker-compose.yml -f docker-compose.kafka.yml up --build
+# Image: confluentinc/cp-kafka (valid tags: 7.5.x, 7.6.x, 7.7.x)
+
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.6.9
+    container_name: pulse-kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"
+      - "29093:29093"
+    environment:
+      # KRaft mode (no Zookeeper) — see Confluent docs
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
+      KAFKA_LISTENERS: PLAINTEXT://kafka:9092,CONTROLLER://kafka:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      CLUSTER_ID: "MkL3xD0ZQo2RDPQVN5nAgg"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 40s
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.9
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "kafka-topics --create --topic pulse.posts --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 || true"
+    restart: "no"
+
+  pipeline:
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: pulse.posts
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
